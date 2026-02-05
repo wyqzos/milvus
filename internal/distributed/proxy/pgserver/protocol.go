@@ -159,14 +159,73 @@ func WriteReadyForQuery(w io.Writer, txStatus byte) error {
 
 // WriteRowDescription writes a row description message.
 func WriteRowDescription(w io.Writer, fields []FieldDescription) error {
-	// TODO: implement proper encoding
-	return nil
+	// Calculate payload size
+	// 2 bytes for field count + field data
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, uint16(len(fields)))
+
+	for _, field := range fields {
+		// Field name (null-terminated)
+		payload = append(payload, []byte(field.Name)...)
+		payload = append(payload, 0)
+
+		// Table OID (4 bytes)
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(field.TableOID))
+		payload = append(payload, buf...)
+
+		// Column attribute number (2 bytes)
+		buf = make([]byte, 2)
+		binary.BigEndian.PutUint16(buf, uint16(field.ColumnAttrNo))
+		payload = append(payload, buf...)
+
+		// Type OID (4 bytes)
+		buf = make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(field.TypeOID))
+		payload = append(payload, buf...)
+
+		// Type size (2 bytes)
+		buf = make([]byte, 2)
+		binary.BigEndian.PutUint16(buf, uint16(field.TypeSize))
+		payload = append(payload, buf...)
+
+		// Type modifier (4 bytes)
+		buf = make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(field.TypeModifier))
+		payload = append(payload, buf...)
+
+		// Format code (2 bytes) - 0 = text, 1 = binary
+		buf = make([]byte, 2)
+		binary.BigEndian.PutUint16(buf, uint16(field.Format))
+		payload = append(payload, buf...)
+	}
+
+	return WriteMessage(w, MsgRowDescription, payload)
 }
 
 // WriteDataRow writes a data row message.
 func WriteDataRow(w io.Writer, values [][]byte) error {
-	// TODO: implement proper encoding
-	return nil
+	// 2 bytes for column count
+	payload := make([]byte, 2)
+	binary.BigEndian.PutUint16(payload, uint16(len(values)))
+
+	for _, val := range values {
+		if val == nil {
+			// NULL value: length = -1
+			buf := make([]byte, 4)
+			binary.BigEndian.PutUint32(buf, 0xFFFFFFFF) // -1 as uint32
+			payload = append(payload, buf...)
+		} else {
+			// Value length (4 bytes)
+			buf := make([]byte, 4)
+			binary.BigEndian.PutUint32(buf, uint32(len(val)))
+			payload = append(payload, buf...)
+			// Value data
+			payload = append(payload, val...)
+		}
+	}
+
+	return WriteMessage(w, MsgDataRow, payload)
 }
 
 // WriteCommandComplete writes a command complete message.
@@ -209,4 +268,18 @@ func WriteSSLResponse(w io.Writer, accept bool) error {
 	}
 	_, err := w.Write([]byte{response})
 	return err
+}
+
+// WriteBackendKeyData writes the backend key data message.
+// This contains the process ID and secret key for cancel requests.
+func WriteBackendKeyData(w io.Writer, processID, secretKey int32) error {
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint32(payload[0:4], uint32(processID))
+	binary.BigEndian.PutUint32(payload[4:8], uint32(secretKey))
+	return WriteMessage(w, MsgBackendKeyData, payload)
+}
+
+// WriteEmptyQueryResponse writes an empty query response.
+func WriteEmptyQueryResponse(w io.Writer) error {
+	return WriteMessage(w, MsgEmptyQueryResponse, nil)
 }

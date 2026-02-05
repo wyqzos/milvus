@@ -114,6 +114,7 @@ type ErrorResponse struct {
 // Common SQLSTATE error codes
 const (
 	SQLStateSuccessfulCompletion = "00000"
+	SQLStateFeatureNotSupported  = "0A000"
 	SQLStateSyntaxError          = "42601"
 	SQLStateUndefinedTable       = "42P01"
 	SQLStateUndefinedColumn      = "42703"

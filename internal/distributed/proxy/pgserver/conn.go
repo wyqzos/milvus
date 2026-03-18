@@ -7,15 +7,18 @@ import (
 	"log"
 	"net"
 	"strings"
+
+	"github.com/milvus-io/milvus/internal/distributed/proxy/pgserver/translator"
 )
 
 // Conn represents a single PostgreSQL client connection.
 type Conn struct {
-	netConn net.Conn
-	reader  *bufio.Reader
-	writer  *bufio.Writer
-	proxy   ProxyComponent
-	config  *Config
+	netConn    net.Conn
+	reader     *bufio.Reader
+	writer     *bufio.Writer
+	proxy      MilvusProxy
+	config     *Config
+	translator *translator.Translator
 
 	// Connection state
 	authenticated bool
@@ -27,7 +30,7 @@ type Conn struct {
 }
 
 // NewConn creates a new connection handler.
-func NewConn(netConn net.Conn, proxy ProxyComponent, config *Config) *Conn {
+func NewConn(netConn net.Conn, proxy MilvusProxy, config *Config) *Conn {
 	return &Conn{
 		netConn:         netConn,
 		reader:          bufio.NewReader(netConn),
@@ -47,7 +50,10 @@ func (c *Conn) Serve(ctx context.Context) error {
 
 	log.Printf("Client connected: user=%s database=%s", c.user, c.database)
 
-	// Step 2: Enter query loop
+	// Step 2: Create translator with the connection's database and proxy
+	c.translator = translator.NewTranslator(c.proxy, c.database)
+
+	// Step 3: Enter query loop
 	return c.queryLoop(ctx)
 }
 
@@ -143,18 +149,21 @@ func (c *Conn) handleSimpleQuery(ctx context.Context, msg *Message) error {
 	query := msg.GetQueryString()
 	log.Printf("Query: %s", query)
 
-	// Handle some basic queries for testing
+	// Fast-path: handle built-in queries that don't need the translator
 	switch {
 	case matchesQuery(query, "SELECT 1"):
 		return c.handleSelect1()
 	case matchesQuery(query, "SELECT VERSION()"):
 		return c.handleSelectVersion()
-	default:
-		// Extract statement type (first 1-2 words) for error message
-		stmtType := getStatementType(query)
-		return c.sendErrorWithCode(SQLStateFeatureNotSupported,
-			fmt.Sprintf("%s is not yet supported", stmtType))
 	}
+
+	// Route through the translator for real SQL
+	result, err := c.translator.Execute(ctx, query)
+	if err != nil {
+		return c.sendErrorWithCode(SQLStateInternalError, err.Error())
+	}
+
+	return c.sendTranslatorResult(result)
 }
 
 // getStatementType extracts the statement type from a SQL query.
@@ -365,16 +374,78 @@ func (c *Conn) sendEmptyQueryResponse() error {
 	return c.writer.Flush()
 }
 
-// sendResult sends query results to the client.
-func (c *Conn) sendResult(result *QueryResult) error {
+// sendTranslatorResult sends a translator.Result to the client as wire protocol messages.
+func (c *Conn) sendTranslatorResult(result *translator.Result) error {
 	if result == nil {
 		return c.sendEmptyQueryResponse()
 	}
 
-	// TODO: implement proper result sending
-	// 1. Send RowDescription
-	// 2. Send DataRow for each row
-	// 3. Send CommandComplete
+	// If there are columns, send RowDescription + DataRows (SELECT-like result)
+	if len(result.Columns) > 0 {
+		// Build FieldDescription from column definitions
+		fields := make([]FieldDescription, len(result.Columns))
+		for i, col := range result.Columns {
+			fields[i] = FieldDescription{
+				Name:         col.Name,
+				TableOID:     0,
+				ColumnAttrNo: int16(i + 1),
+				TypeOID:      typeNameToOID(col.Type),
+				TypeSize:     -1,
+				TypeModifier: -1,
+				Format:       0, // text
+			}
+		}
+		if err := WriteRowDescription(c.writer, fields); err != nil {
+			return err
+		}
 
-	return c.sendEmptyQueryResponse()
+		// Send each row as a DataRow
+		for _, row := range result.Rows {
+			values := make([][]byte, len(row))
+			for j, val := range row {
+				values[j] = formatValue(val)
+			}
+			if err := WriteDataRow(c.writer, values); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Send CommandComplete
+	tag := result.CommandTag
+	if tag == "" {
+		tag = "OK"
+	}
+	if err := WriteCommandComplete(c.writer, tag); err != nil {
+		return err
+	}
+
+	if err := c.writer.Flush(); err != nil {
+		return err
+	}
+
+	return c.sendReadyForQuery()
 }
+
+// typeNameToOID maps type name strings to PostgreSQL OIDs.
+func typeNameToOID(typeName string) int32 {
+	switch strings.ToLower(typeName) {
+	case "int", "integer", "int4":
+		return OIDInt4
+	case "bigint", "int8":
+		return OIDInt8
+	case "float", "float4", "real":
+		return OIDFloat4
+	case "double", "float8":
+		return OIDFloat8
+	case "bool", "boolean":
+		return OIDBool
+	case "text", "varchar", "string":
+		return OIDText
+	case "json", "jsonb":
+		return OIDJSONB
+	default:
+		return OIDText
+	}
+}
+

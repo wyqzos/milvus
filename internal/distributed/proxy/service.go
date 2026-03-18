@@ -49,6 +49,7 @@ import (
 	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 	mix "github.com/milvus-io/milvus/internal/distributed/mixcoord/client"
 	"github.com/milvus-io/milvus/internal/distributed/proxy/httpserver"
+	"github.com/milvus-io/milvus/internal/distributed/proxy/pgserver"
 	"github.com/milvus-io/milvus/internal/distributed/streaming"
 	"github.com/milvus-io/milvus/internal/distributed/utils"
 	mhttp "github.com/milvus-io/milvus/internal/http"
@@ -108,6 +109,8 @@ type Server struct {
 
 	etcdCli        *clientv3.Client
 	mixCoordClient types.MixCoordClient
+
+	pgServer *pgserver.Server
 }
 
 // NewServer create a Proxy server.
@@ -208,6 +211,29 @@ func (s *Server) startHTTPServer(errChan chan error) {
 		return
 	}
 	log.Ctx(s.ctx).Info("Proxy http server exited")
+}
+
+// startPGServer creates and starts the PostgreSQL wire protocol server on port 15432.
+func (s *Server) startPGServer() error {
+	const pgPort = 15432
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", pgPort))
+	if err != nil {
+		return fmt.Errorf("listen on port %d: %w", pgPort, err)
+	}
+
+	config := &pgserver.Config{
+		Port:     pgPort,
+		Host:     "0.0.0.0",
+		Database: "default",
+	}
+	s.pgServer = pgserver.NewServer(s.proxy, config)
+	if err := s.pgServer.Start(listener); err != nil {
+		listener.Close()
+		return fmt.Errorf("start pgserver: %w", err)
+	}
+
+	log.Ctx(s.ctx).Info("Proxy pgserver started", zap.Int("port", pgPort))
+	return nil
 }
 
 func (s *Server) startInternalRPCServer(errChan chan error) {
@@ -546,6 +572,12 @@ func (s *Server) start() error {
 		}
 	}
 
+	// Start PostgreSQL wire protocol server
+	if err := s.startPGServer(); err != nil {
+		log.Warn("failed to start pgserver, PostgreSQL interface disabled", zap.Error(err))
+		// Non-fatal: pgserver is optional, don't block proxy startup
+	}
+
 	return nil
 }
 
@@ -577,6 +609,11 @@ func (s *Server) Stop() (err error) {
 		if s.grpcExternalServer != nil {
 			logger.Info("Proxy stop external grpc server")
 			utils.GracefulStopGRPCServer(s.grpcExternalServer)
+		}
+
+		if s.pgServer != nil {
+			logger.Info("Proxy stop pgserver")
+			s.pgServer.Stop()
 		}
 
 		if s.httpServer != nil {

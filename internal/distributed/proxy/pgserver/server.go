@@ -8,18 +8,22 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"
 )
 
-// ProxyComponent interface for Milvus operations.
-// TODO: Replace with actual types.ProxyComponent when integrating with Milvus
-type ProxyComponent interface {
-	// Add methods as needed during implementation
+// MilvusProxy defines the minimal Milvus interface needed by pgserver.
+// The real Proxy satisfies this interface automatically since Go interfaces
+// are implicit — no "implements" declaration needed.
+type MilvusProxy interface {
+	Search(ctx context.Context, req *milvuspb.SearchRequest) (*milvuspb.SearchResults, error)
+	Insert(ctx context.Context, req *milvuspb.InsertRequest) (*milvuspb.MutationResult, error)
 }
 
 // Server handles PostgreSQL protocol connections and translates
 // SQL queries to Milvus operations.
 type Server struct {
-	proxy    ProxyComponent
+	proxy    MilvusProxy
 	listener net.Listener
 	config   *Config
 
@@ -30,7 +34,7 @@ type Server struct {
 }
 
 // NewServer creates a new PostgreSQL protocol server.
-func NewServer(proxy ProxyComponent, config *Config) *Server {
+func NewServer(proxy MilvusProxy, config *Config) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
 		proxy:  proxy,

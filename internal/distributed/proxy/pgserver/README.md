@@ -108,41 +108,60 @@ pgserver/
 ### Roadmap
 
 #### Phase 1: End-to-End MVP
-Connect to real Milvus and get first queries working with manual SQL parsing.
+Connect to real Milvus, INSERT and vector Search working via psql.
 
-- [ ] Connect to Milvus `ProxyComponent` (replace placeholder interface)
-- [ ] `INSERT INTO` → Milvus Insert (manual parsing)
-- [ ] `SELECT ... ORDER BY vec <-> '[...]'` → Milvus Search (manual parsing)
-- [ ] `SHOW TABLES` → list Milvus collections
+- [x] Wire protocol (connect, auth, query, disconnect)
+- [x] `SELECT 1`, `SELECT version()`
+- [x] Manual SQL parser for SELECT (vector search) and INSERT
+- [x] Translator wired into conn.go
+- [ ] Swap local types → real `milvuspb`/`schemapb` proto types
+- [ ] Build proper `milvuspb.SearchRequest` (PlaceholderGroup, SearchParams)
+- [ ] Parse `milvuspb.SearchResults` (column-oriented FieldsData → rows)
+- [ ] Build proper `milvuspb.InsertRequest` (rows → column-oriented FieldData)
+- [ ] Register pgserver as listener in proxy `service.go` (minimal, hardcoded port)
+- [ ] **Verify:** create collection via gRPC, INSERT via psql, SELECT vector search via psql
 
-#### Phase 2: Core DML
-Expand query support with more data operations.
+#### Phase 2: Core DML + Core DDL
+Expand query support and add basic schema operations.
 
-- [ ] `SELECT * FROM collection WHERE ...` → Milvus Query
-- [ ] `DELETE FROM` → Milvus Delete
+- [ ] `SHOW TABLES` → `ShowCollections`
+- [ ] `SELECT * FROM collection WHERE ...` → `Query` (filtered, no vector search)
+- [ ] `DELETE FROM collection WHERE ...` → `Delete`
+- [ ] `CREATE TABLE` → `CreateCollection` (parse column defs, map types to FieldSchema)
+- [ ] `DROP TABLE [IF EXISTS]` → `DropCollection`
+- [ ] `CREATE INDEX` → `CreateIndex` (map HNSW/IVFFlat)
+- [ ] **Verify:** full lifecycle via psql — create table, create index, insert, search, delete, drop
 
 #### Phase 3: SQL Parser
 Replace manual parsing with proper SQL parser for correctness and full syntax support.
 
-- [ ] SQL parser integration (`pg_query_go`)
-- [ ] Rewrite translators to use AST instead of string matching
+- [ ] Add `pg_query_go` dependency
+- [ ] Rewrite parseSelect, parseInsert, parseDelete to use AST
+- [ ] Remove manual string parsing helpers and `getStatementType()` hack
+- [ ] Handle edge cases: aliases, quoted identifiers, expressions
+- [ ] **Verify:** existing end-to-end tests still pass with new parser
 
-#### Phase 4: DDL
-Schema operations.
+#### Phase 4: Full DDL + Full DML
+Complete SQL coverage.
 
-- [ ] `CREATE TABLE` → CreateCollection
-- [ ] `DROP TABLE` → DropCollection
-- [ ] `CREATE INDEX` → CreateIndex
+- [ ] `DROP INDEX` → `DropIndex`
+- [ ] `ALTER TABLE` → collection schema changes
+- [ ] `DESCRIBE` / `\d` → `DescribeCollection`
+- [ ] `UPDATE` → `Upsert`
+- [ ] `INSERT ... ON CONFLICT` → `Upsert`
+- [ ] **Verify:** all SQL operations work end-to-end via psql
 
 #### Phase 5: Production Readiness
 Polish for real-world use.
 
-- [ ] Register pgserver in Milvus proxy `service.go`
-- [ ] Configuration via `milvus.yaml`
+- [ ] Configuration via `milvus.yaml` (enable/disable, port, auth mode)
 - [ ] Milvus auth passthrough
 - [ ] TLS support
 - [ ] Graceful shutdown
 - [ ] Prepared statements (Parse/Bind/Execute)
+- [ ] Handle SET commands and psql introspection queries
+- [ ] Replace standard `log` with Milvus `pkg/log`
+- [ ] **Verify:** psql interactive session works smoothly end-to-end
 
 ## Dependencies
 
@@ -153,18 +172,4 @@ Polish for real-world use.
 ## Development Notes
 
 - Test server runs on port 15432 to avoid conflicts with real PostgreSQL (5432).
-
-### Temporary Hacks to Remove Later
-
-- `getStatementType()` in `conn.go` - Parses SQL statement type by word-splitting (e.g., "DROP TABLE", "INSERT INTO"). This is fragile and should be replaced by proper AST node types once `pg_query_go` SQL parser is integrated.
-
-### Temporary Standard Library Replacements
-
-To allow standalone development and avoid Milvus multi-module dependency issues, the following Milvus packages were replaced with standard library equivalents. These should be restored when integrating into the full Milvus build.
-
-| Current (standard library) | Replace with (Milvus) | Files affected |
-|---|---|---|
-| `"log"` (standard) | `"github.com/milvus-io/milvus/pkg/log"` (zap-based) | server.go, conn.go |
-| `ProxyComponent` (local interface) | `types.ProxyComponent` from `"github.com/milvus-io/milvus/internal/types"` | server.go, conn.go |
-| `MilvusDataType` (local constants) | `schemapb.DataType` from `"github.com/milvus-io/milvus-proto/go-api/v2/schemapb"` | translator/types.go |
-| N/A (stubbed out) | `"github.com/milvus-io/milvus-proto/go-api/v2/milvuspb"` for request/response types | translator/select.go, insert.go, delete.go, ddl.go |
+- See `CLAUDE.md` in this directory for implementation notes and temporary hacks to track.
